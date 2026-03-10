@@ -1,21 +1,26 @@
-import { NextRequest, NextResponse } from "next/server";
-import { readFile, stat } from "fs/promises";
+import { NextResponse } from "next/server";
+import { readFile, stat, readdir } from "fs/promises";
 import path from "path";
 import { existsSync } from "fs";
 
 const OUTPUT_DIR = path.join(process.cwd(), "outputs");
 
 export async function GET(
-  req: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
+  _req: Request,
+  { params }: { params: Promise<{ path: string[] }> }
 ) {
   try {
-    const { id } = await params;
+    const { path: routePath } = await params;
+    const [jobId, ...rest] = routePath;
 
-    // The id might include the filename separated by /
-    // URL format: /api/download/[jobId]/[filename]
-    const jobDir = path.join(OUTPUT_DIR, id);
+    if (!jobId) {
+      return NextResponse.json(
+        { code: "DOWNLOAD_NOT_FOUND", message: "Missing job id." },
+        { status: 400 }
+      );
+    }
 
+    const jobDir = path.join(OUTPUT_DIR, jobId);
     if (!existsSync(jobDir)) {
       return NextResponse.json(
         { code: "DOWNLOAD_NOT_FOUND", message: "The requested file was not found." },
@@ -23,20 +28,19 @@ export async function GET(
       );
     }
 
-    // Get filename from search params or find the first output file
-    const url = new URL(req.url);
-    const segments = url.pathname.split("/").filter(Boolean);
-    const fileName = segments.length > 3 ? decodeURIComponent(segments.slice(3).join("/")) : null;
-
     let filePath: string;
-    if (fileName) {
-      filePath = path.join(jobDir, fileName);
+    if (rest.length > 0) {
+      const requested = decodeURIComponent(rest.join("/"));
+      const normalized = path.normalize(requested).replace(/^([.][.][/\\])+/, "");
+      filePath = path.join(jobDir, normalized);
+      if (!filePath.startsWith(jobDir)) {
+        return NextResponse.json(
+          { code: "DOWNLOAD_NOT_FOUND", message: "Invalid file path." },
+          { status: 400 }
+        );
+      }
     } else {
-      // Find first non-meta file in output dir
-      const { readdirSync } = require("fs");
-      const files = readdirSync(jobDir).filter(
-        (f: string) => !f.startsWith("_")
-      );
+      const files = (await readdir(jobDir)).filter((f) => !f.startsWith("_"));
       if (files.length === 0) {
         return NextResponse.json(
           { code: "DOWNLOAD_NOT_FOUND", message: "No output file found." },
@@ -53,11 +57,9 @@ export async function GET(
       );
     }
 
-    const fileBuffer = await readFile(filePath);
-    const fileStat = await stat(filePath);
+    const [fileBuffer, fileStat] = await Promise.all([readFile(filePath), stat(filePath)]);
     const outputName = path.basename(filePath);
 
-    // Determine content type
     const ext = path.extname(outputName).toLowerCase();
     const contentTypes: Record<string, string> = {
       ".pdf": "application/pdf",
@@ -66,11 +68,10 @@ export async function GET(
       ".jpeg": "image/jpeg",
       ".png": "image/png",
     };
-    const contentType = contentTypes[ext] || "application/octet-stream";
 
     return new NextResponse(fileBuffer, {
       headers: {
-        "Content-Type": contentType,
+        "Content-Type": contentTypes[ext] || "application/octet-stream",
         "Content-Disposition": `attachment; filename="${outputName}"`,
         "Content-Length": fileStat.size.toString(),
       },
