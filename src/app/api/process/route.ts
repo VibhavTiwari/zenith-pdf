@@ -14,6 +14,7 @@ import { watermarkPdf } from "@/services/pdf/watermark";
 import { addPageNumbers } from "@/services/pdf/page-numbers";
 import { editMetadata } from "@/services/pdf/metadata";
 import { organizePages } from "@/services/pdf/organize";
+import { resolveToolOrThrow } from "@/lib/tool-validation";
 
 const UPLOAD_DIR = path.join(process.cwd(), "uploads");
 const OUTPUT_DIR = path.join(process.cwd(), "outputs");
@@ -52,7 +53,7 @@ const PROCESSORS: Record<string, ProcessorFn> = {
   "page-numbers": addPageNumbers,
   "pdf-metadata": editMetadata,
   "organize-pages": organizePages,
-  "extract-pages": splitPdf, // reuse split logic
+  "extract-pages": splitPdf,
 };
 
 export async function POST(req: NextRequest) {
@@ -69,7 +70,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Read job metadata
+    resolveToolOrThrow(tool);
+
     const metaPath = path.join(UPLOAD_DIR, jobId, "_meta.json");
     if (!existsSync(metaPath)) {
       return NextResponse.json(
@@ -79,32 +81,40 @@ export async function POST(req: NextRequest) {
     }
 
     const meta: JobMeta = JSON.parse(await readFile(metaPath, "utf-8"));
+    if (meta.tool !== tool) {
+      return NextResponse.json(
+        {
+          code: "PROCESS_UNSUPPORTED_OPERATION",
+          message: `Job was uploaded for \"${meta.tool}\" but requested \"${tool}\".`,
+        },
+        { status: 409 }
+      );
+    }
 
-    // Check if tool has a processor
     const processor = PROCESSORS[tool];
     if (!processor) {
       return NextResponse.json(
         {
           code: "PROCESS_UNSUPPORTED_OPERATION",
-          message: `Tool "${tool}" is not yet available. Coming soon.`,
+          message: `Tool \"${tool}\" does not have a processing pipeline yet.`,
         },
         { status: 400 }
       );
     }
 
-    // Create output directory
     const jobOutputDir = path.join(OUTPUT_DIR, jobId);
     if (!existsSync(OUTPUT_DIR)) {
       await mkdir(OUTPUT_DIR, { recursive: true });
     }
     await mkdir(jobOutputDir, { recursive: true });
 
-    // Process
+    meta.status = "processing";
+    await writeFile(metaPath, JSON.stringify(meta, null, 2));
+
     const result = await processor(meta.files, options, jobOutputDir);
 
     const processingTime = Date.now() - startTime;
 
-    // Update metadata
     meta.status = "completed";
     await writeFile(metaPath, JSON.stringify(meta, null, 2));
 
@@ -119,11 +129,17 @@ export async function POST(req: NextRequest) {
     });
   } catch (error) {
     console.error("Processing error:", error);
+
     const message =
       error instanceof Error ? error.message : "An unexpected error occurred during processing.";
-    return NextResponse.json(
-      { code: "PROCESS_INTERNAL_ERROR", message },
-      { status: 500 }
-    );
+
+    if (message.startsWith("Unsupported tool") || message.includes("not available yet")) {
+      return NextResponse.json(
+        { code: "PROCESS_UNSUPPORTED_OPERATION", message },
+        { status: 400 }
+      );
+    }
+
+    return NextResponse.json({ code: "PROCESS_INTERNAL_ERROR", message }, { status: 500 });
   }
 }

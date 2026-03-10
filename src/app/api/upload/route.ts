@@ -3,6 +3,10 @@ import { writeFile, mkdir } from "fs/promises";
 import path from "path";
 import { existsSync } from "fs";
 import { generateId } from "@/lib/utils";
+import {
+  resolveToolOrThrow,
+  validateUploadAgainstTool,
+} from "@/lib/tool-validation";
 
 const UPLOAD_DIR = path.join(process.cwd(), "uploads");
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
@@ -11,7 +15,7 @@ export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
     const files = formData.getAll("files") as File[];
-    const tool = formData.get("tool") as string;
+    const toolSlug = formData.get("tool") as string;
 
     if (!files || files.length === 0) {
       return NextResponse.json(
@@ -20,14 +24,22 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    if (!tool) {
+    if (!toolSlug) {
       return NextResponse.json(
         { code: "PROCESS_UNSUPPORTED_OPERATION", message: "No tool specified." },
         { status: 400 }
       );
     }
 
-    // Validate files
+    const tool = resolveToolOrThrow(toolSlug);
+    const validationError = validateUploadAgainstTool(tool, files);
+    if (validationError) {
+      return NextResponse.json(
+        { code: "UPLOAD_UNSUPPORTED_FORMAT", message: validationError },
+        { status: 422 }
+      );
+    }
+
     for (const file of files) {
       if (file.size === 0) {
         return NextResponse.json(
@@ -49,7 +61,6 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Create job directory
     const jobId = generateId();
     const jobDir = path.join(UPLOAD_DIR, jobId);
     if (!existsSync(UPLOAD_DIR)) {
@@ -57,7 +68,6 @@ export async function POST(req: NextRequest) {
     }
     await mkdir(jobDir, { recursive: true });
 
-    // Save files
     const savedFiles: { name: string; path: string; size: number }[] = [];
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
@@ -68,21 +78,28 @@ export async function POST(req: NextRequest) {
       savedFiles.push({ name: file.name, path: filePath, size: file.size });
     }
 
-    // Save job metadata
     const metadata = {
       jobId,
-      tool,
+      tool: tool.slug,
       files: savedFiles,
       createdAt: new Date().toISOString(),
       status: "uploaded",
     };
-    await writeFile(
-      path.join(jobDir, "_meta.json"),
-      JSON.stringify(metadata, null, 2)
-    );
+
+    await writeFile(path.join(jobDir, "_meta.json"), JSON.stringify(metadata, null, 2));
 
     return NextResponse.json({ jobId, fileCount: files.length });
   } catch (error) {
+    const message = error instanceof Error ? error.message : "An unexpected upload error occurred.";
+    const isToolError = message.startsWith("Unsupported tool") || message.includes("not available yet");
+
+    if (isToolError) {
+      return NextResponse.json(
+        { code: "PROCESS_UNSUPPORTED_OPERATION", message },
+        { status: 400 }
+      );
+    }
+
     console.error("Upload error:", error);
     return NextResponse.json(
       {
