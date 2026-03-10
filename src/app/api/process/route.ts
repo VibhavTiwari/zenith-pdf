@@ -15,7 +15,6 @@ import { addPageNumbers } from "@/services/pdf/page-numbers";
 import { editMetadata } from "@/services/pdf/metadata";
 import { organizePages } from "@/services/pdf/organize";
 import { resolveToolOrThrow } from "@/lib/tool-validation";
-import { isExpired } from "@/lib/job-retention";
 
 const UPLOAD_DIR = path.join(process.cwd(), "uploads");
 const OUTPUT_DIR = path.join(process.cwd(), "outputs");
@@ -76,7 +75,7 @@ export async function POST(req: NextRequest) {
 
     resolveToolOrThrow(tool);
 
-    metaPath = path.join(UPLOAD_DIR, jobId, "_meta.json");
+    const metaPath = path.join(UPLOAD_DIR, jobId, "_meta.json");
     if (!existsSync(metaPath)) {
       return NextResponse.json(
         { code: "DOWNLOAD_NOT_FOUND", message: "Job not found." },
@@ -84,23 +83,12 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const jobMeta: JobMeta = JSON.parse(await readFile(metaPath, "utf-8"));
-    meta = jobMeta;
-
-    if (isExpired(jobMeta.createdAt)) {
-      jobMeta.status = "expired";
-      await writeFile(metaPath, JSON.stringify(jobMeta, null, 2));
-      return NextResponse.json(
-        { code: "DOWNLOAD_EXPIRED", message: "Job has expired. Please upload files again." },
-        { status: 410 }
-      );
-    }
-
-    if (jobMeta.tool !== tool) {
+    const meta: JobMeta = JSON.parse(await readFile(metaPath, "utf-8"));
+    if (meta.tool !== tool) {
       return NextResponse.json(
         {
           code: "PROCESS_UNSUPPORTED_OPERATION",
-          message: `Job was uploaded for "${jobMeta.tool}" but requested "${tool}".`,
+          message: `Job was uploaded for \"${meta.tool}\" but requested \"${tool}\".`,
         },
         { status: 409 }
       );
@@ -111,7 +99,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         {
           code: "PROCESS_UNSUPPORTED_OPERATION",
-          message: `Tool "${tool}" does not have a processing pipeline yet.`,
+          message: `Tool \"${tool}\" does not have a processing pipeline yet.`,
         },
         { status: 400 }
       );
@@ -123,13 +111,15 @@ export async function POST(req: NextRequest) {
     }
     await mkdir(jobOutputDir, { recursive: true });
 
-    jobMeta.status = "processing";
-    await writeFile(metaPath, JSON.stringify(jobMeta, null, 2));
+    meta.status = "processing";
+    await writeFile(metaPath, JSON.stringify(meta, null, 2));
+
+    const result = await processor(meta.files, options, jobOutputDir);
 
     const result = await processor(jobMeta.files, options, jobOutputDir);
 
-    jobMeta.status = "completed";
-    await writeFile(metaPath, JSON.stringify(jobMeta, null, 2));
+    meta.status = "completed";
+    await writeFile(metaPath, JSON.stringify(meta, null, 2));
 
     return NextResponse.json({
       downloadUrl: `/api/download/${jobId}/${encodeURIComponent(result.fileName)}`,
@@ -142,11 +132,6 @@ export async function POST(req: NextRequest) {
     });
   } catch (error) {
     console.error("Processing error:", error);
-
-    if (metaPath && meta) {
-      meta.status = "failed";
-      await writeFile(metaPath, JSON.stringify(meta, null, 2));
-    }
 
     const message =
       error instanceof Error ? error.message : "An unexpected error occurred during processing.";

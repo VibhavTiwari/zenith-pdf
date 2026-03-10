@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 import { readFile } from "fs/promises";
 import path from "path";
 import { existsSync } from "fs";
-import { computeExpiry, isExpired } from "@/lib/job-retention";
 
 const UPLOAD_DIR = path.join(process.cwd(), "uploads");
 
@@ -24,20 +23,15 @@ export async function GET(
     jobId: string;
     tool: string;
     createdAt: string;
-    expiresAt?: string;
     status: string;
     files: { name: string; size: number }[];
   };
-
-  const expired = isExpired(meta.createdAt);
 
   return NextResponse.json({
     jobId: meta.jobId,
     tool: meta.tool,
     createdAt: meta.createdAt,
-    expiresAt: meta.expiresAt ?? computeExpiry(meta.createdAt),
-    expired,
-    status: expired && meta.status !== "completed" ? "expired" : meta.status,
+    status: meta.status,
     files: meta.files.map((f) => ({ name: f.name, size: f.size })),
   });
 }

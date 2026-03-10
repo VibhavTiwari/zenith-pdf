@@ -2,10 +2,8 @@ import { NextResponse } from "next/server";
 import { readFile, stat, readdir } from "fs/promises";
 import path from "path";
 import { existsSync } from "fs";
-import { isExpired } from "@/lib/job-retention";
 
 const OUTPUT_DIR = path.join(process.cwd(), "outputs");
-const UPLOAD_DIR = path.join(process.cwd(), "uploads");
 
 export async function GET(
   _req: Request,
@@ -20,17 +18,6 @@ export async function GET(
         { code: "DOWNLOAD_NOT_FOUND", message: "Missing job id." },
         { status: 400 }
       );
-    }
-
-    const metaPath = path.join(UPLOAD_DIR, jobId, "_meta.json");
-    if (existsSync(metaPath)) {
-      const meta = JSON.parse(await readFile(metaPath, "utf-8")) as { createdAt: string };
-      if (isExpired(meta.createdAt)) {
-        return NextResponse.json(
-          { code: "DOWNLOAD_EXPIRED", message: "This download link has expired." },
-          { status: 410 }
-        );
-      }
     }
 
     const jobDir = path.join(OUTPUT_DIR, jobId);

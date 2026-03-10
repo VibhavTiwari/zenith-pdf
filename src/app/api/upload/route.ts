@@ -7,7 +7,6 @@ import {
   resolveToolOrThrow,
   validateUploadAgainstTool,
 } from "@/lib/tool-validation";
-import { computeExpiry } from "@/lib/job-retention";
 
 const UPLOAD_DIR = path.join(process.cwd(), "uploads");
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
@@ -79,7 +78,6 @@ export async function POST(req: NextRequest) {
       savedFiles.push({ name: file.name, path: filePath, size: file.size });
     }
 
-    const createdAt = new Date().toISOString();
     const metadata = {
       jobId,
       tool: tool.slug,
