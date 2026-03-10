@@ -1,6 +1,8 @@
-import { PDFDocument } from "pdf-lib";
 import { readFile, writeFile } from "fs/promises";
 import path from "path";
+import { buildZipFromDiskFiles } from "@/lib/zip";
+
+type ImageFormat = "png" | "jpeg";
 
 export async function pdfToImages(
   files: { name: string; path: string; size: number }[],
@@ -8,38 +10,57 @@ export async function pdfToImages(
   outputDir: string
 ) {
   const fileBuffer = await readFile(files[0].path);
-  const pdfDoc = await PDFDocument.load(fileBuffer, { ignoreEncryption: true });
-  const totalPages = pdfDoc.getPageCount();
-  const format = (options.format as string) || "png";
+  const format = ((options.format as string) || "png").toLowerCase() === "jpg" ? "jpeg" : (((options.format as string) || "png").toLowerCase() as ImageFormat);
+  const density = Math.max(72, Math.min(300, Number(options.density) || 144));
 
-  // Since we can't easily render PDF pages to images without a canvas/browser
-  // environment (pdfjs-dist needs canvas), we'll extract embedded images instead
-  // or create a simple representation
-
-  // For each page, create a new single-page PDF and save it
-  // This gives users individual page PDFs which is useful
-  const outputFiles: string[] = [];
-
-  for (let i = 0; i < totalPages; i++) {
-    const singlePagePdf = await PDFDocument.create();
-    const [page] = await singlePagePdf.copyPages(pdfDoc, [i]);
-    singlePagePdf.addPage(page);
-    const pdfBytes = await singlePagePdf.save();
-    const pageName = `page_${i + 1}.pdf`;
-    await writeFile(path.join(outputDir, pageName), pdfBytes);
-    outputFiles.push(pageName);
+  if (!["png", "jpeg"].includes(format)) {
+    throw new Error("Unsupported image output format. Use PNG or JPG.");
   }
 
-  // Return the first page file
-  const firstFile = path.join(outputDir, outputFiles[0]);
-  const firstFileBuffer = await readFile(firstFile);
+  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  const { createCanvas } = await import("@napi-rs/canvas");
+
+  const loadingTask = pdfjs.getDocument({
+    data: new Uint8Array(fileBuffer),
+    disableWorker: true,
+    useSystemFonts: true,
+    isEvalSupported: false,
+  } as never);
+
+  const pdf = await loadingTask.promise;
+  const outputFiles: { name: string; path: string }[] = [];
+
+  for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
+    const page = await pdf.getPage(pageNo);
+    const viewport = page.getViewport({ scale: density / 72 });
+    const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
+    const context = canvas.getContext("2d");
+
+    await page.render({ canvasContext: context as never, viewport } as never).promise;
+
+    const fileName = `page_${pageNo}.${format === "jpeg" ? "jpg" : "png"}`;
+    const filePath = path.join(outputDir, fileName);
+
+    const imageBytes =
+      format === "jpeg"
+        ? canvas.toBuffer("image/jpeg", 90)
+        : canvas.toBuffer("image/png");
+
+    await writeFile(filePath, imageBytes);
+    outputFiles.push({ name: fileName, path: filePath });
+  }
+
+  const zipBytes = await buildZipFromDiskFiles(outputFiles);
+  const fileName = "pdf_images.zip";
+  const outputPath = path.join(outputDir, fileName);
+  await writeFile(outputPath, zipBytes);
 
   return {
-    outputPath: firstFile,
-    fileName: outputFiles[0],
-    fileSize: firstFileBuffer.length,
+    outputPath,
+    fileName,
+    fileSize: zipBytes.length,
     originalSize: fileBuffer.length,
-    pageCount: totalPages,
-    message: `Extracted ${totalPages} pages as individual PDF files. Full image rendering requires server-side canvas support.`,
+    pageCount: pdf.numPages,
+    message: `Rendered ${pdf.numPages} page${pdf.numPages === 1 ? "" : "s"} to ${format.toUpperCase()} images and bundled as ZIP.`,
   };
 }

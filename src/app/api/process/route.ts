@@ -14,6 +14,8 @@ import { watermarkPdf } from "@/services/pdf/watermark";
 import { addPageNumbers } from "@/services/pdf/page-numbers";
 import { editMetadata } from "@/services/pdf/metadata";
 import { organizePages } from "@/services/pdf/organize";
+import { resolveToolOrThrow } from "@/lib/tool-validation";
+import { isExpired } from "@/lib/job-retention";
 
 const UPLOAD_DIR = path.join(process.cwd(), "uploads");
 const OUTPUT_DIR = path.join(process.cwd(), "outputs");
@@ -23,6 +25,7 @@ interface JobMeta {
   tool: string;
   files: { name: string; path: string; size: number }[];
   createdAt: string;
+  expiresAt?: string;
   status: string;
 }
 
@@ -52,11 +55,13 @@ const PROCESSORS: Record<string, ProcessorFn> = {
   "page-numbers": addPageNumbers,
   "pdf-metadata": editMetadata,
   "organize-pages": organizePages,
-  "extract-pages": splitPdf, // reuse split logic
+  "extract-pages": splitPdf,
 };
 
 export async function POST(req: NextRequest) {
   const startTime = Date.now();
+  let metaPath: string | null = null;
+  let meta: JobMeta | null = null;
 
   try {
     const body = await req.json();
@@ -69,8 +74,9 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Read job metadata
-    const metaPath = path.join(UPLOAD_DIR, jobId, "_meta.json");
+    resolveToolOrThrow(tool);
+
+    metaPath = path.join(UPLOAD_DIR, jobId, "_meta.json");
     if (!existsSync(metaPath)) {
       return NextResponse.json(
         { code: "DOWNLOAD_NOT_FOUND", message: "Job not found." },
@@ -78,35 +84,52 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const meta: JobMeta = JSON.parse(await readFile(metaPath, "utf-8"));
+    const jobMeta: JobMeta = JSON.parse(await readFile(metaPath, "utf-8"));
+    meta = jobMeta;
 
-    // Check if tool has a processor
+    if (isExpired(jobMeta.createdAt)) {
+      jobMeta.status = "expired";
+      await writeFile(metaPath, JSON.stringify(jobMeta, null, 2));
+      return NextResponse.json(
+        { code: "DOWNLOAD_EXPIRED", message: "Job has expired. Please upload files again." },
+        { status: 410 }
+      );
+    }
+
+    if (jobMeta.tool !== tool) {
+      return NextResponse.json(
+        {
+          code: "PROCESS_UNSUPPORTED_OPERATION",
+          message: `Job was uploaded for "${jobMeta.tool}" but requested "${tool}".`,
+        },
+        { status: 409 }
+      );
+    }
+
     const processor = PROCESSORS[tool];
     if (!processor) {
       return NextResponse.json(
         {
           code: "PROCESS_UNSUPPORTED_OPERATION",
-          message: `Tool "${tool}" is not yet available. Coming soon.`,
+          message: `Tool "${tool}" does not have a processing pipeline yet.`,
         },
         { status: 400 }
       );
     }
 
-    // Create output directory
     const jobOutputDir = path.join(OUTPUT_DIR, jobId);
     if (!existsSync(OUTPUT_DIR)) {
       await mkdir(OUTPUT_DIR, { recursive: true });
     }
     await mkdir(jobOutputDir, { recursive: true });
 
-    // Process
-    const result = await processor(meta.files, options, jobOutputDir);
+    jobMeta.status = "processing";
+    await writeFile(metaPath, JSON.stringify(jobMeta, null, 2));
 
-    const processingTime = Date.now() - startTime;
+    const result = await processor(jobMeta.files, options, jobOutputDir);
 
-    // Update metadata
-    meta.status = "completed";
-    await writeFile(metaPath, JSON.stringify(meta, null, 2));
+    jobMeta.status = "completed";
+    await writeFile(metaPath, JSON.stringify(jobMeta, null, 2));
 
     return NextResponse.json({
       downloadUrl: `/api/download/${jobId}/${encodeURIComponent(result.fileName)}`,
@@ -114,16 +137,27 @@ export async function POST(req: NextRequest) {
       fileSize: result.fileSize,
       originalSize: result.originalSize,
       pageCount: result.pageCount,
-      processingTime,
+      processingTime: Date.now() - startTime,
       message: result.message,
     });
   } catch (error) {
     console.error("Processing error:", error);
+
+    if (metaPath && meta) {
+      meta.status = "failed";
+      await writeFile(metaPath, JSON.stringify(meta, null, 2));
+    }
+
     const message =
       error instanceof Error ? error.message : "An unexpected error occurred during processing.";
-    return NextResponse.json(
-      { code: "PROCESS_INTERNAL_ERROR", message },
-      { status: 500 }
-    );
+
+    if (message.startsWith("Unsupported tool") || message.includes("not available yet")) {
+      return NextResponse.json(
+        { code: "PROCESS_UNSUPPORTED_OPERATION", message },
+        { status: 400 }
+      );
+    }
+
+    return NextResponse.json({ code: "PROCESS_INTERNAL_ERROR", message }, { status: 500 });
   }
 }

@@ -1,11 +1,14 @@
 import { PDFDocument } from "pdf-lib";
 import { readFile, writeFile } from "fs/promises";
 import path from "path";
+import { buildZipFromDiskFiles } from "@/lib/zip";
 
 function parsePageRanges(rangeStr: string, totalPages: number): number[][] {
-  // Parse ranges like "1-3,5,7-10" into arrays of page indices (0-based)
   const groups: number[][] = [];
-  const parts = rangeStr.split(",").map((s) => s.trim());
+  const parts = rangeStr
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 
   for (const part of parts) {
     if (part.includes("-")) {
@@ -26,6 +29,11 @@ function parsePageRanges(rangeStr: string, totalPages: number): number[][] {
       groups.push([pageNum - 1]);
     }
   }
+
+  if (groups.length === 0) {
+    throw new Error("Please provide at least one page range.");
+  }
+
   return groups;
 }
 
@@ -46,36 +54,35 @@ export async function splitPdf(
   const rangeStr = (options.ranges as string) || "";
 
   if (mode === "single-pages") {
-    // Split into individual pages
-    const outputFiles: string[] = [];
+    const outputFiles: { name: string; path: string }[] = [];
+
     for (let i = 0; i < totalPages; i++) {
       const newPdf = await PDFDocument.create();
       const [page] = await newPdf.copyPages(srcPdf, [i]);
       newPdf.addPage(page);
       const pdfBytes = await newPdf.save();
       const pageName = `page_${i + 1}.pdf`;
-      await writeFile(path.join(outputDir, pageName), pdfBytes);
-      outputFiles.push(pageName);
+      const pagePath = path.join(outputDir, pageName);
+      await writeFile(pagePath, pdfBytes);
+      outputFiles.push({ name: pageName, path: pagePath });
     }
 
-    // For simplicity, return the first file — in production, would ZIP them
-    const fileName = `split_${totalPages}_pages.pdf`;
-    // Actually just return the first page as proof of concept
-    // and report success
-    const firstBytes = await readFile(path.join(outputDir, outputFiles[0]));
+    const zipBytes = await buildZipFromDiskFiles(outputFiles);
+    const fileName = "split_pages.zip";
+    const outputPath = path.join(outputDir, fileName);
+    await writeFile(outputPath, zipBytes);
+
     return {
-      outputPath: path.join(outputDir, outputFiles[0]),
-      fileName: outputFiles[0],
-      fileSize: firstBytes.length,
+      outputPath,
+      fileName,
+      fileSize: zipBytes.length,
       originalSize: fileBuffer.length,
-      pageCount: 1,
-      message: `Split into ${totalPages} individual page files. Download includes the first page.`,
+      pageCount: totalPages,
+      message: `Split into ${totalPages} individual PDF files (ZIP).`,
     };
   }
 
-  // Split by ranges
   if (!rangeStr) {
-    // Default: split in half
     const mid = Math.ceil(totalPages / 2);
     const newPdf = await PDFDocument.create();
     const pages = await newPdf.copyPages(
@@ -85,10 +92,11 @@ export async function splitPdf(
     pages.forEach((p) => newPdf.addPage(p));
     const pdfBytes = await newPdf.save();
     const fileName = "split_part1.pdf";
-    await writeFile(path.join(outputDir, fileName), pdfBytes);
+    const outputPath = path.join(outputDir, fileName);
+    await writeFile(outputPath, pdfBytes);
 
     return {
-      outputPath: path.join(outputDir, fileName),
+      outputPath,
       fileName,
       fileSize: pdfBytes.length,
       originalSize: fileBuffer.length,
@@ -97,7 +105,6 @@ export async function splitPdf(
     };
   }
 
-  // Parse ranges and extract
   const groups = parsePageRanges(rangeStr, totalPages);
   const allPages = groups.flat();
 
@@ -107,10 +114,11 @@ export async function splitPdf(
   const pdfBytes = await newPdf.save();
 
   const fileName = "split_extracted.pdf";
-  await writeFile(path.join(outputDir, fileName), pdfBytes);
+  const outputPath = path.join(outputDir, fileName);
+  await writeFile(outputPath, pdfBytes);
 
   return {
-    outputPath: path.join(outputDir, fileName),
+    outputPath,
     fileName,
     fileSize: pdfBytes.length,
     originalSize: fileBuffer.length,
