@@ -1,6 +1,7 @@
 import { PDFDocument } from "pdf-lib";
 import { readFile, writeFile } from "fs/promises";
 import path from "path";
+import sharp from "sharp";
 
 export async function imagesToPdf(
   files: { name: string; path: string; size: number }[],
@@ -29,9 +30,11 @@ export async function imagesToPdf(
         img = await pdfDoc.embedPng(imageBuffer);
       } else if ([".jpg", ".jpeg"].includes(ext)) {
         img = await pdfDoc.embedJpg(imageBuffer);
+      } else if ([".webp", ".tiff", ".tif", ".heic", ".heif"].includes(ext)) {
+        const converted = await sharp(imageBuffer).jpeg({ quality: 92 }).toBuffer();
+        img = await pdfDoc.embedJpg(converted);
       } else {
-        // Skip unsupported formats silently
-        continue;
+        throw new Error(`Unsupported image format ${ext}`);
       }
 
       let pageWidth: number;
@@ -44,18 +47,13 @@ export async function imagesToPdf(
         pageWidth = 612;
         pageHeight = 792;
       } else {
-        // "fit" - use image dimensions
         pageWidth = img.width;
         pageHeight = img.height;
       }
 
       const page = pdfDoc.addPage([pageWidth, pageHeight]);
 
-      // Scale image to fit page while maintaining aspect ratio
-      const scale = Math.min(
-        pageWidth / img.width,
-        pageHeight / img.height
-      );
+      const scale = Math.min(pageWidth / img.width, pageHeight / img.height);
       const scaledWidth = img.width * scale;
       const scaledHeight = img.height * scale;
       const x = (pageWidth - scaledWidth) / 2;
@@ -70,13 +68,12 @@ export async function imagesToPdf(
 
       imageCount++;
     } catch (e) {
-      // Skip images that fail to embed
       console.error(`Failed to embed image ${file.name}:`, e);
     }
   }
 
   if (imageCount === 0) {
-    throw new Error("No valid images could be processed. Supported formats: JPG, PNG.");
+    throw new Error("No valid images could be processed.");
   }
 
   const pdfBytes = await pdfDoc.save();

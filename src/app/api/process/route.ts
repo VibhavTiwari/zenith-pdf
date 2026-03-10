@@ -24,6 +24,7 @@ interface JobMeta {
   tool: string;
   files: { name: string; path: string; size: number }[];
   createdAt: string;
+  expiresAt?: string;
   status: string;
 }
 
@@ -58,6 +59,8 @@ const PROCESSORS: Record<string, ProcessorFn> = {
 
 export async function POST(req: NextRequest) {
   const startTime = Date.now();
+  let metaPath: string | null = null;
+  let meta: JobMeta | null = null;
 
   try {
     const body = await req.json();
@@ -113,7 +116,7 @@ export async function POST(req: NextRequest) {
 
     const result = await processor(meta.files, options, jobOutputDir);
 
-    const processingTime = Date.now() - startTime;
+    const result = await processor(jobMeta.files, options, jobOutputDir);
 
     meta.status = "completed";
     await writeFile(metaPath, JSON.stringify(meta, null, 2));
@@ -124,7 +127,7 @@ export async function POST(req: NextRequest) {
       fileSize: result.fileSize,
       originalSize: result.originalSize,
       pageCount: result.pageCount,
-      processingTime,
+      processingTime: Date.now() - startTime,
       message: result.message,
     });
   } catch (error) {

@@ -9,8 +9,10 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@napi-rs/canvas": "^0.1.96",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "jszip": "^3.10.1",
     "lucide-react": "^0.575.0",
     "next": "16.1.6",
     "pdf-lib": "^1.17.1",

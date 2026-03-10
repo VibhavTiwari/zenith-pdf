@@ -82,7 +82,8 @@ export async function POST(req: NextRequest) {
       jobId,
       tool: tool.slug,
       files: savedFiles,
-      createdAt: new Date().toISOString(),
+      createdAt,
+      expiresAt: computeExpiry(createdAt),
       status: "uploaded",
     };
 
